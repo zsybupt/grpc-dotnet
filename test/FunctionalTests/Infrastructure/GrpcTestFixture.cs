@@ -18,10 +18,8 @@
 
 using System;
 using System.Net.Http;
-using FunctionalTestsWebsite.Infrastructure;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http.Features;
-using Microsoft.AspNetCore.TestHost;
+using Grpc.Net.Client;
+using Microsoft.AspNetCore.Server.Kestrel.Core;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 
@@ -29,43 +27,72 @@ namespace Grpc.AspNetCore.FunctionalTests.Infrastructure
 {
     public class GrpcTestFixture<TStartup> : IDisposable where TStartup : class
     {
-        private readonly TestServer _server;
+        private readonly InProcessTestServer _server;
 
-        public GrpcTestFixture()
+        public GrpcTestFixture(Action<IServiceCollection>? initialConfigureServices = null)
         {
-            TrailersContainer = new TrailersContainer();
-
             LoggerFactory = new LoggerFactory();
 
             Action<IServiceCollection> configureServices = services =>
             {
-                // Register trailers container so tests can assert trailer headers
-                // Not thread safe for parallel calls
-                services.AddSingleton(TrailersContainer);
-
                 // Registers a service for tests to add new methods
                 services.AddSingleton<DynamicGrpcServiceRegistry>();
-
-                services.AddSingleton<ILoggerFactory>(LoggerFactory);
             };
 
-            var builder = new WebHostBuilder()
-                .ConfigureServices(configureServices)
-                .UseStartup<TStartup>();
+            _server = new InProcessTestServer<TStartup>(services =>
+            {
+                initialConfigureServices?.Invoke(services);
+                configureServices(services);
+            });
 
-            _server = new TestServer(builder);
+            _server.StartServer();
 
-            DynamicGrpc = _server.Host.Services.GetRequiredService<DynamicGrpcServiceRegistry>();
+            DynamicGrpc = _server.Host!.Services.GetRequiredService<DynamicGrpcServiceRegistry>();
 
-            Client = _server.CreateClient();
-            Client.BaseAddress = new Uri("http://localhost");
+            AppContext.SetSwitch("System.Net.Http.SocketsHttpHandler.Http2UnencryptedSupport", true);
+
+            Client = CreateClient();
         }
 
-        public TrailersContainer TrailersContainer { get; }
-        public LoggerFactory LoggerFactory { get; }
+        public ILoggerFactory LoggerFactory { get; }
         public DynamicGrpcServiceRegistry DynamicGrpc { get; }
 
         public HttpClient Client { get; }
+
+        public HttpClient CreateClient(HttpProtocols? httpProtocol = null, DelegatingHandler? messageHandler = null)
+        {
+            HttpClient client;
+            if (messageHandler != null)
+            {
+                messageHandler.InnerHandler = new HttpClientHandler();
+                client = new HttpClient(messageHandler);
+            }
+            else
+            {
+                client = new HttpClient();
+            }
+
+            switch (httpProtocol ?? HttpProtocols.Http2)
+            {
+                case HttpProtocols.Http1:
+                    client.BaseAddress = new Uri(_server.GetUrl(HttpProtocols.Http1));
+                    break;
+                case HttpProtocols.Http2:
+                    client.DefaultRequestVersion = new Version(2, 0);
+                    client.BaseAddress = new Uri(_server.GetUrl(HttpProtocols.Http2));
+                    break;
+                default:
+                    throw new ArgumentException("Unexpected value.", nameof(httpProtocol));
+            }
+
+            return client;
+        }
+
+        internal event Action<LogRecord> ServerLogged
+        {
+            add => _server.ServerLogged += value;
+            remove => _server.ServerLogged -= value;
+        }
 
         public void Dispose()
         {

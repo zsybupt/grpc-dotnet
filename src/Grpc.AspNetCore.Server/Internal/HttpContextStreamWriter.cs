@@ -25,9 +25,9 @@ namespace Grpc.AspNetCore.Server.Internal
     internal class HttpContextStreamWriter<TResponse> : IServerStreamWriter<TResponse>
     {
         private readonly HttpContextServerCallContext _context;
-        private readonly Func<TResponse, byte[]> _serializer;
+        private readonly Action<TResponse, SerializationContext> _serializer;
 
-        public HttpContextStreamWriter(HttpContextServerCallContext context, Func<TResponse, byte[]> serializer)
+        public HttpContextStreamWriter(HttpContextServerCallContext context, Action<TResponse, SerializationContext> serializer)
         {
             _context = context;
             _serializer = serializer;
@@ -51,7 +51,7 @@ namespace Grpc.AspNetCore.Server.Internal
                 throw new InvalidOperationException("Cannot write message after request is complete.");
             }
 
-            return _context.HttpContext.Response.BodyPipe.WriteMessageAsync(message, _context, _serializer);
+            return _context.HttpContext.Response.BodyWriter.WriteMessageAsync(message, _context, _serializer, canFlush: true);
         }
     }
 }
